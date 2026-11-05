@@ -18,7 +18,12 @@ package org.springframework.boot.system;
 
 import java.io.File;
 import java.io.FileReader;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
+import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -26,7 +31,9 @@ import org.junit.rules.TemporaryFolder;
 import org.springframework.util.FileCopyUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIOException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.contentOf;
 
 /**
  * Tests for {@link ApplicationPid}.
@@ -76,8 +83,57 @@ public class ApplicationPidTests {
 	}
 
 	@Test
+	public void overwriteExistingPid() throws Exception {
+		File file = new File(this.temporaryFolder.getRoot(), "pid");
+		new ApplicationPid("123").write(file);
+		assertThat(contentOf(file)).isEqualTo("123");
+		new ApplicationPid("456").write(file);
+		assertThat(contentOf(file)).isEqualTo("456");
+	}
+
+	@Test
+	public void writePidWhenParentDirectoryIsSymlinkToDirectory() throws Exception {
+		assumeNotWindows();
+		File directory = this.temporaryFolder.newFolder("directory");
+		File parentLink = new File(this.temporaryFolder.getRoot(), "parent");
+		Files.createSymbolicLink(parentLink.toPath(), directory.toPath());
+		File file = new File(parentLink, "pid");
+		new ApplicationPid("123").write(file);
+		assertThat(contentOf(new File(directory, "pid"))).isEqualTo("123");
+	}
+
+	@Test
+	public void whenSymlinkToNonExistentTargetExistsAtPidFileLocationWriteThrows() throws IOException {
+		assumeNotWindows();
+		File link = new File(this.temporaryFolder.getRoot(), "pid");
+		File target = new File(this.temporaryFolder.getRoot(), "target");
+		Files.createSymbolicLink(link.toPath(), target.toPath());
+		ApplicationPid pid = new ApplicationPid("123");
+		assertThatIOException().isThrownBy(() -> pid.write(link));
+		assertThat(Files.isSymbolicLink(link.toPath())).isTrue();
+		assertThat(target).doesNotExist();
+	}
+
+	@Test
+	public void whenSymlinkToTargetExistsAtPidFileLocationWriteThrows() throws IOException {
+		assumeNotWindows();
+		File link = new File(this.temporaryFolder.getRoot(), "pid");
+		Path target = new File(this.temporaryFolder.getRoot(), "target").toPath();
+		Files.write(target, "target".getBytes(), StandardOpenOption.CREATE_NEW);
+		Files.createSymbolicLink(link.toPath(), target);
+		ApplicationPid pid = new ApplicationPid("123");
+		assertThatIOException().isThrownBy(() -> pid.write(link));
+		assertThat(Files.isSymbolicLink(link.toPath())).isTrue();
+		assertThat(target).hasContent("target");
+	}
+
+	@Test
 	public void getPidFromJvm() {
 		assertThat(new ApplicationPid().toString()).isNotEmpty();
+	}
+
+	private void assumeNotWindows() {
+		Assume.assumeFalse("Symbolic links are not supported on Windows", File.separatorChar == '\\');
 	}
 
 }
