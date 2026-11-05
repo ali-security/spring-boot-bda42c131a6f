@@ -16,6 +16,7 @@
 
 package org.springframework.boot.env;
 
+import java.security.SecureRandom;
 import java.util.Random;
 import java.util.UUID;
 
@@ -63,7 +64,7 @@ public class RandomValuePropertySource extends PropertySource<Random> {
 	private static final Log logger = LogFactory.getLog(RandomValuePropertySource.class);
 
 	public RandomValuePropertySource(String name) {
-		super(name, new Random());
+		super(name, new SecureRandom());
 	}
 
 	public RandomValuePropertySource() {

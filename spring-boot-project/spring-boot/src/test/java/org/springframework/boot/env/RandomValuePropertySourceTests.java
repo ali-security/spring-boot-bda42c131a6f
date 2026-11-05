@@ -16,6 +16,7 @@
 
 package org.springframework.boot.env;
 
+import java.security.SecureRandom;
 import java.util.Random;
 import java.util.UUID;
 
@@ -42,7 +43,43 @@ public class RandomValuePropertySourceTests {
 
 	@Test
 	public void string() {
-		assertThat(this.source.getProperty("random.string")).isNotNull();
+		assertThat(this.source.getProperty("random.string")).isNotNull().asString().containsPattern("^[0-9a-f]{32}$");
+	}
+
+	@Test
+	public void sourceIsSecureRandom() {
+		assertThat(this.source.getSource()).isInstanceOf(SecureRandom.class);
+	}
+
+	@Test
+	public void intValuesCannotBePredictedFromPreviousValues() {
+		int first = (Integer) this.source.getProperty("random.int");
+		int second = (Integer) this.source.getProperty("random.int");
+		int third = (Integer) this.source.getProperty("random.int");
+		Integer predicted = predictNextIntOfJavaUtilRandom(first, second);
+		assertThat(predicted == null || predicted != third).isTrue();
+	}
+
+	/**
+	 * Recover the internal state of a {@link Random} linear congruential generator from
+	 * two consecutive {@code nextInt()} values and use it to predict the next one.
+	 * @param first the first observed value
+	 * @param second the second observed value
+	 * @return the predicted next value or {@code null} if no matching state was found
+	 */
+	private Integer predictNextIntOfJavaUtilRandom(int first, int second) {
+		long multiplier = 0x5DEECE66DL;
+		long addend = 0xBL;
+		long mask = (1L << 48) - 1;
+		for (long low = 0; low < (1L << 16); low++) {
+			long seed = ((first & 0xFFFFFFFFL) << 16) | low;
+			long next = (seed * multiplier + addend) & mask;
+			if ((int) (next >>> 16) == second) {
+				long predicted = (next * multiplier + addend) & mask;
+				return (int) (predicted >>> 16);
+			}
+		}
+		return null;
 	}
 
 	@Test
