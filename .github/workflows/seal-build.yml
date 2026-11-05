@@ -1,0 +1,129 @@
+# Seal build: upstream Spring Boot 2.1.x has no GitHub Actions CI (it builds on
+# Concourse via ci/scripts/build-project.sh). This workflow mirrors that build:
+# JDK 8, Maven, `-N install` of the root build pom, then the spring-boot-project
+# reactor, running the project's own surefire suites.
+name: seal-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Surefire -Dtest selector; empty runs the full suites"
+        required: false
+        default: ""
+
+env:
+  MAVEN_VERSION: 3.9.5
+  MAVEN_OPTS: -Xmx2048m
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 48
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: spring-boot (jar + tests)
+            install: spring-boot
+            test: spring-boot
+            pack: true
+          - name: spring-boot-test + actuator-autoconfigure tests
+            install: spring-boot-test,spring-boot-actuator-autoconfigure
+            test: spring-boot-test,spring-boot-actuator-autoconfigure
+            pack: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Install Maven ${{ env.MAVEN_VERSION }}
+        run: |
+          curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Configure Maven (Central mirror, no Gradle Enterprise extension)
+        run: |
+          # repo.spring.io / bintray repositories declared in pom.xml are no longer
+          # reachable anonymously; every released dependency is on Maven Central.
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<'EOF'
+          <settings>
+            <mirrors>
+              <mirror>
+                <id>central-mirror</id>
+                <mirrorOf>*</mirrorOf>
+                <url>https://repo.maven.apache.org/maven2</url>
+              </mirror>
+            </mirrors>
+          </settings>
+          EOF
+          # Build-scan extensions (gradle-enterprise / io.spring.ge.conventions) need
+          # the Spring GE server; they do not affect the produced artifacts.
+          rm -f .mvn/extensions.xml
+          mvn -v
+
+      - name: Install root build pom
+        run: mvn -B -N install -DskipTests -Ddisable.checks=true
+
+      - name: Build modules (no tests)
+        run: mvn -B -f spring-boot-project/pom.xml -pl ${{ matrix.install }} -am install -DskipTests -Ddisable.checks=true
+
+      - name: Stage release jar
+        if: matrix.pack
+        run: |
+          mkdir -p dist
+          cp spring-boot-project/spring-boot/target/spring-boot-2.1.18.RELEASE.jar dist/
+
+      - name: Test
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            mvn -B -f spring-boot-project/pom.xml -pl ${{ matrix.test }} verify -Ddisable.checks=true -Dtest='${{ inputs.test-filter }}' -DfailIfNoTests=false
+          else
+            mvn -B -f spring-boot-project/pom.xml -pl ${{ matrix.test }} verify -Ddisable.checks=true
+          fi
+
+      - name: Surefire summary
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import glob, xml.etree.ElementTree as ET
+          from collections import defaultdict
+          tot = defaultdict(int); mods = defaultdict(lambda: defaultdict(int)); skipped = []
+          for f in sorted(glob.glob('spring-boot-project/**/target/surefire-reports/TEST-*.xml', recursive=True)):
+              mod = f.split('/target/')[0].split('/')[-1]
+              r = ET.parse(f).getroot()
+              for k in ('tests', 'failures', 'errors', 'skipped'):
+                  v = int(r.get(k, 0)); tot[k] += v; mods[mod][k] += v
+              for tc in r.iter('testcase'):
+                  s = tc.find('skipped')
+                  if s is not None:
+                      skipped.append((tc.get('classname'), tc.get('name'), s.get('message') or '(@Ignore/@Disabled without message)'))
+          for m, d in mods.items():
+              print(f"[{m}] tests={d['tests']} passed={d['tests']-d['failures']-d['errors']-d['skipped']} failures={d['failures']} errors={d['errors']} skipped={d['skipped']}")
+          print(f"TOTAL tests={tot['tests']} passed={tot['tests']-tot['failures']-tot['errors']-tot['skipped']} failures={tot['failures']} errors={tot['errors']} skipped={tot['skipped']}")
+          # Assumption skips whose JUnit message names no cause, resolved from the
+          # test source: UndertowServletWebServerFactoryTests.getJspServlet() returns
+          # null ("Undertow does not support JSPs"), so the JSP tests inherited from
+          # AbstractServletWebServerFactoryTests assume a JSP servlet and skip.
+          reasons = {
+              'UndertowServletWebServerFactoryTests.jspServletIsNotInDevelopmentModeByDefault': 'Undertow does not support JSPs (getJspServlet() returns null by design, UndertowServletWebServerFactoryTests.java:234); inherited JSP test assumes a JSP servlet',
+              'UndertowServletWebServerFactoryTests.jspServletInitParameters': 'Undertow does not support JSPs (getJspServlet() returns null by design, UndertowServletWebServerFactoryTests.java:234); inherited JSP test assumes a JSP servlet',
+              'SpringBootContextLoaderTests.environmentPropertiesNewLineInValue': 'upstream bare @Ignore (SpringBootContextLoaderTests.java:84)',
+          }
+          for c, n, msg in skipped:
+              why = reasons.get(f"{c.split('.')[-1]}.{n}")
+              print(f"SKIPPED {c}.{n}: {msg}" + (f" -- reason: {why}" if why else ""))
+          EOF
+
+      - name: Upload jar
+        if: matrix.pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: spring-boot-jar
+          path: dist/spring-boot-2.1.18.RELEASE.jar
+          if-no-files-found: error
